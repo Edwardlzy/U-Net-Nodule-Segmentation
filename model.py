@@ -154,7 +154,7 @@ class Unet_3D(nn.Module):
         self.conv7_1 = nn.Conv3d(64, 64, 3, padding=1)
         self.bn7_1 = nn.BatchNorm3d(64)
 
-        self.conv8 = nn.Conv3d(64, out_channel, padding=1)
+        self.conv8 = nn.Conv3d(64, out_channel, 1, padding=1)
 
     def forward(self, x):
 

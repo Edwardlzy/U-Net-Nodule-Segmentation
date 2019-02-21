@@ -117,11 +117,12 @@ def train(images_loader, lungmasks_loader, masks_loader, opts):
         iter_masks = iter(masks_loader)
 
         for iteration in range(iter_per_epoch):
-            image = to_var(iter_images.next()[0]).float().unsqueeze(dim=2)
-            lungmask = to_var(iter_lungmasks.next()[0]).float().unsqueeze(dim=2)
-            mask = to_var(iter_masks.next()[0]).float().unsqueeze(dim=2)
+            image = to_var(iter_images.next()[0]).float().unsqueeze(dim=1)
+            lungmask = to_var(iter_lungmasks.next()[0]).float().unsqueeze(dim=1)
+            mask = to_var(iter_masks.next()[0]).float().unsqueeze(dim=1)
             train_X = image * lungmask
             print('train_X.shape =', train_X.shape)
+            print('mask.shape =', mask.shape)
 
             # Training
             optimizer.zero_grad()

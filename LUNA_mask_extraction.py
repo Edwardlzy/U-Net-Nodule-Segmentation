@@ -62,9 +62,9 @@ Returns uint16 version
 ############
 #
 # Getting list of image files
-luna_path = "..\\..\\datasets\\data_science_bowl_2017\\"
-luna_subset_path = os.path.join(luna_path, 'LUNA', 'subset5\\')
-output_path = "..\\..\\datasets\\data_science_bowl_2017\\processed_LUNA\\subset5\\"
+luna_path = "..\\datasets\\data_science_bowl_2017\\"
+luna_subset_path = os.path.join(luna_path, 'LUNA', 'subset4\\')
+output_path = "..\\datasets\\data_science_bowl_2017\\processed_LUNA_full\\subset4\\"
 file_list=glob(luna_subset_path+"*.mhd")
 
 
@@ -98,6 +98,7 @@ for fcount, img_file in enumerate(tqdm(file_list)):
             continue
         img_array = sitk.GetArrayFromImage(itk_img) # indexes are z,y,x (notice the ordering)
         num_z, height, width = img_array.shape        #heightXwidth constitute the transverse plane
+        print('img_array.shape =', img_array.shape)
         origin = np.array(itk_img.GetOrigin())      # x,y,z  Origin in world coordinates (mm)
         spacing = np.array(itk_img.GetSpacing())    # spacing of voxels in world coor. (mm)
         # go through all nodes (why just the biggest?)
@@ -107,12 +108,12 @@ for fcount, img_file in enumerate(tqdm(file_list)):
             node_z = cur_row["coordZ"]
             diam = cur_row["diameter_mm"]
             # just keep 3 slices
-            imgs = np.ndarray([3,height,width],dtype=np.float32)
-            masks = np.ndarray([3,height,width],dtype=np.uint8)
+            imgs = np.ndarray([256,height,width],dtype=np.float32)
+            masks = np.ndarray([256,height,width],dtype=np.uint8)
             center = np.array([node_x, node_y, node_z])   # nodule center
             v_center = np.rint((center-origin)/spacing)  # nodule center in voxel space (still x,y,z ordering)
-            for i, i_z in enumerate(np.arange(int(v_center[2])-1,
-                             int(v_center[2])+2).clip(0, num_z-1)): # clip prevents going out of bounds in Z
+            for i, i_z in enumerate(np.arange(int(v_center[2])-128,
+                             int(v_center[2])+128).clip(0, num_z-1)): # clip prevents going out of bounds in Z
                 mask = make_mask(center, diam, i_z*spacing[2]+origin[2],
                                  width, height, spacing, origin)
                 masks[i] = mask

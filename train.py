@@ -1,4 +1,3 @@
-from __future__ import print_function
 import argparse
 import torch
 import torch.nn as nn
@@ -19,6 +18,23 @@ def dice_coef_loss(outputs, masks):
     return -(2 * intersection + 1) / (torch.sum(outputs) + torch.sum(masks) + 1)
 
 
+def ce_loss(outputs, masks):
+    """ Compute the cross entropy loss. """
+    outputs = torch.squeeze(outputs)
+    masks = torch.squeeze(masks)
+    # total = masks.shape[0] * masks.shape[1] * masks.shape[2]
+    # print('masks =', masks)
+    # print('outputs =', outputs)
+    # print('intermediate =', masks * torch.log2(outputs))
+    intermediate = masks * torch.log2(outputs) + (1 - masks) * torch.log2(1 - outputs)
+    nan_sum = torch.sum(torch.isnan(intermediate)).float()
+    print('nan num =', nan_sum)
+    # intermediate[torch.isnan(intermediate)] = 0
+    # loss = -1 * torch.sum(intermediate) / (total - nan_sum)
+    loss = -1 * torch.sum(intermediate)
+    return loss.float() + 10000 * dice_coef_loss(outputs, masks)
+
+
 def load_image_npy(path):
     """ Load a numpy array given its path. """
     image = np.transpose(np.load(path), (1, 2, 0))
@@ -31,19 +47,33 @@ def load_mask_npy(path):
     return np.transpose(np.load(path), (1, 2, 0))
 
 
+class Resize(object):
+    """ Resize the image in numpy format. """
+    def __init__(self, down_factor):
+        self.down_factor = down_factor
+
+    def __call__(self, imagedata):
+        if self.down_factor < 4:
+            return imagedata[::self.down_factor, ::self.down_factor]
+        else:
+            return imagedata[::self.down_factor, ::self.down_factor, ::int(self.down_factor/2)]
+
+
 def get_3d_data_loader(opts):
     """ Return the dataloader for 3d nodule images. """
-    transform = transforms.Compose([transforms.ToTensor()])
+    transform = transforms.Compose([Resize(8),
+                                    transforms.ToTensor()])
 
     images_dataset = datasets.DatasetFolder(opts.images_path, load_image_npy, ['npy'], transform)
-    lungmasks_dataset = datasets.DatasetFolder(opts.lungmasks_path, load_mask_npy, ['npy'], transform)
+    # lungmasks_dataset = datasets.DatasetFolder(opts.lungmasks_path, load_mask_npy, ['npy'], transform)
     masks_dataset = datasets.DatasetFolder(opts.masks_path, load_mask_npy, ['npy'], transform)
 
     images_loader = DataLoader(dataset=images_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
-    lungmasks_loader = DataLoader(dataset=lungmasks_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
+    # lungmasks_loader = DataLoader(dataset=lungmasks_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
     masks_loader = DataLoader(dataset=masks_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
 
-    return images_loader, lungmasks_loader, masks_loader
+    # return images_loader, lungmasks_loader, masks_loader
+    return images_loader, masks_loader
 
 
 # def train(args, model, device, train_loader, optimizer, epoch):
@@ -89,7 +119,8 @@ def get_3d_data_loader(opts):
 #             torch.save(model.state_dict(), 'ckpt_' + str(epoch) + '_' + str(best_acc) + '.pt')
 
 
-def train(images_loader, lungmasks_loader, masks_loader, opts):
+# def train(images_loader, lungmasks_loader, masks_loader, opts):
+def train(images_loader, masks_loader, opts):
     """
     Train the 3D Unet on the given datasets.
     """
@@ -112,32 +143,32 @@ def train(images_loader, lungmasks_loader, masks_loader, opts):
         torch.manual_seed(seed)
         iter_images = iter(images_loader)
         torch.manual_seed(seed)
-        iter_lungmasks = iter(lungmasks_loader)
+        # iter_lungmasks = iter(lungmasks_loader)
         torch.manual_seed(seed)
         iter_masks = iter(masks_loader)
 
         for iteration in range(iter_per_epoch):
             image = to_var(iter_images.next()[0]).float().unsqueeze(dim=1)
-            lungmask = to_var(iter_lungmasks.next()[0]).float().unsqueeze(dim=1)
+            # lungmask = to_var(iter_lungmasks.next()[0]).float().unsqueeze(dim=1)
             mask = to_var(iter_masks.next()[0]).float().unsqueeze(dim=1)
-            train_X = image * lungmask
-            print('train_X.shape =', train_X.shape)
-            print('mask.shape =', mask.shape)
+            # train_X = image * lungmask
+            train_X = image
 
             # Training
             optimizer.zero_grad()
             pred = model(train_X)
-            loss = dice_coef_loss(pred, mask)
+            dice_coef = dice_coef_loss(pred, mask)
+            loss = ce_loss(pred, mask)
             loss.backward()
             optimizer.step()
 
             if iteration % opts.log_interval == 0:
-                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {}'.format(
                 epoch, iteration * len(image), len(images_loader),
                 100. * iteration * opts.batch_size / len(images_loader), loss.item()))
 
-            if -loss.item() > best_acc:
-                best_acc = -loss.item()
+            if -dice_coef.item() > best_acc:
+                best_acc = -dice_coef.item()
                 print('Saving model with dice coefficient =', best_acc)
                 torch.save(model, save_path)
 
@@ -177,25 +208,25 @@ def create_parser():
     Creates a parser for command-line arguments. 
     """
     parser = argparse.ArgumentParser(description='PyTorch Unet Example')
-    parser.add_argument('--images_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA\\3d_data\\images')
-    parser.add_argument('--lungmasks_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA\\3d_data\\lungmasks')
-    parser.add_argument('--masks_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA\\3d_data\\masks')
+    parser.add_argument('--images_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA_full\\3d_data\\images')
+    # parser.add_argument('--lungmasks_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA_full\\3d_data\\lungmasks')
+    parser.add_argument('--masks_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA_full\\3d_data\\masks')
     parser.add_argument('--batch_size', type=int, default=1, metavar='N',
                         help='input batch size for training (default: 2)')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/')
     # parser.add_argument('--test-batch-size', type=int, default=16, metavar='N',
     #                     help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=40, metavar='N',
+    parser.add_argument('--epochs', type=int, default=20, metavar='N',
                         help='number of epochs to train (default: 10)')
-    parser.add_argument('--lr', type=float, default=1.0e-5, metavar='LR',
+    parser.add_argument('--lr', type=float, default=1.0e-1, metavar='LR',
                         help='learning rate (default: 0.01)')
-    parser.add_argument('--decay_step', type=int, default=20, help='Number of steps before decaying.')
-    parser.add_argument('--decay_factor', type=float, default=0.2, help='The factor to be multiplied to the learning rate.')
+    parser.add_argument('--decay_step', type=int, default=5, help='Number of steps before decaying.')
+    parser.add_argument('--decay_factor', type=float, default=0.1, help='The factor to be multiplied to the learning rate.')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--log_interval', type=int, default=5, metavar='N',
+    parser.add_argument('--log_interval', type=int, default=1, metavar='N',
                         help='how many batches to wait before logging training status')
 
     return parser
@@ -217,9 +248,12 @@ def main(opts):
     """
     Train the 3d Unet on 3d lung nodule dataset.
     """
-    images_loader, lungmasks_loader, masks_loader = get_3d_data_loader(opts)
+    # images_loader, lungmasks_loader, masks_loader = get_3d_data_loader(opts)
+    images_loader, masks_loader = get_3d_data_loader(opts)
+
     if not os.path.isdir(opts.checkpoint_dir): os.mkdir(opts.checkpoint_dir)
-    train(images_loader, lungmasks_loader, masks_loader, opts)
+    # train(images_loader, lungmasks_loader, masks_loader, opts)
+    train(images_loader, masks_loader, opts)
 
     # # Training settings
     

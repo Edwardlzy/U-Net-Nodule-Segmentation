@@ -108,7 +108,7 @@ class Unet_3D(nn.Module):
     Unet architecture. Reference: https://arxiv.org/abs/1505.04597
     """
 
-    def __init__(self, in_channels=3, out_channel=3):
+    def __init__(self, in_channels=1, out_channel=1):
         super(Unet_3D, self).__init__()
 
         self.down_sample = nn.MaxPool3d(2, stride=2)
@@ -154,7 +154,7 @@ class Unet_3D(nn.Module):
         self.conv7_1 = nn.Conv3d(64, 64, 3, padding=1)
         self.bn7_1 = nn.BatchNorm3d(64)
 
-        self.conv8 = nn.Conv3d(64, out_channel, 1, padding=1)
+        self.conv8 = nn.Conv3d(64, out_channel, 1)
 
     def forward(self, x):
 
@@ -190,6 +190,6 @@ class Unet_3D(nn.Module):
         activation_7 = self.relu(self.bn7_0(self.conv7_0(concat_7)))
         activation_7 = self.relu(self.bn7_1(self.conv7_1(activation_7)))
 
-        out = self.conv8(activation_7)
+        out = self.sigmoid(self.conv8(activation_7))
 
         return out

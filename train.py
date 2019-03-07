@@ -14,8 +14,10 @@ import os
 
 def dice_coef_loss(outputs, masks):
     """ Compute the dice coefficient loss between the output and groundtruth mask. """
+    outputs = torch.squeeze(outputs)
+    masks = torch.squeeze(masks)
     intersection = torch.sum(outputs * masks)
-    return -(2 * intersection + 1) / (torch.sum(outputs) + torch.sum(masks) + 1)
+    return -(2 * intersection + 1e-5) / (torch.sum(outputs) + torch.sum(masks) + 1e-5)
 
 
 def ce_loss(outputs, masks):
@@ -28,11 +30,12 @@ def ce_loss(outputs, masks):
     # print('intermediate =', masks * torch.log2(outputs))
     intermediate = masks * torch.log2(outputs) + (1 - masks) * torch.log2(1 - outputs)
     nan_sum = torch.sum(torch.isnan(intermediate)).float()
-    print('nan num =', nan_sum)
+    # print('nan num =', nan_sum)
     # intermediate[torch.isnan(intermediate)] = 0
     # loss = -1 * torch.sum(intermediate) / (total - nan_sum)
     loss = -1 * torch.sum(intermediate)
-    return loss.float() + 10000 * dice_coef_loss(outputs, masks)
+    return 0.1 * loss.float() + 10 * dice_coef_loss(outputs, masks)
+    # return loss.float()
 
 
 def load_image_npy(path):
@@ -53,24 +56,25 @@ class Resize(object):
         self.down_factor = down_factor
 
     def __call__(self, imagedata):
-        if self.down_factor < 4:
-            return imagedata[::self.down_factor, ::self.down_factor]
-        else:
-            return imagedata[::self.down_factor, ::self.down_factor, ::int(self.down_factor/2)]
+        # if self.down_factor < 4:
+        #     return imagedata[::self.down_factor, ::self.down_factor]
+        # else:
+        #     # return imagedata[::self.down_factor, ::self.down_factor, ::int(self.down_factor/2)]
+        return imagedata[::self.down_factor, ::self.down_factor, 96:-96]
 
 
 def get_3d_data_loader(opts):
     """ Return the dataloader for 3d nodule images. """
-    transform = transforms.Compose([Resize(8),
+    transform = transforms.Compose([Resize(4),
                                     transforms.ToTensor()])
 
     images_dataset = datasets.DatasetFolder(opts.images_path, load_image_npy, ['npy'], transform)
     # lungmasks_dataset = datasets.DatasetFolder(opts.lungmasks_path, load_mask_npy, ['npy'], transform)
     masks_dataset = datasets.DatasetFolder(opts.masks_path, load_mask_npy, ['npy'], transform)
 
-    images_loader = DataLoader(dataset=images_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
+    images_loader = DataLoader(dataset=images_dataset, batch_size=opts.batch_size, shuffle=True)
     # lungmasks_loader = DataLoader(dataset=lungmasks_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
-    masks_loader = DataLoader(dataset=masks_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
+    masks_loader = DataLoader(dataset=masks_dataset, batch_size=opts.batch_size, shuffle=True)
 
     # return images_loader, lungmasks_loader, masks_loader
     return images_loader, masks_loader
@@ -125,8 +129,10 @@ def train(images_loader, masks_loader, opts):
     Train the 3D Unet on the given datasets.
     """
     # Initialize or load the model
-    save_path = os.path.join(opts.checkpoint_dir, 'best_ckpt.pth')
-    if os.path.exists(save_path): model = torch.load(save_path)
+    save_path = os.path.join(opts.checkpoint_dir, 'best_ckpt_2.51e-5.pth')
+    if os.path.exists(save_path): 
+        model = torch.load(save_path)
+        save_path = os.path.join(opts.checkpoint_dir, 'best_ckpt.pth')
     else: model = Unet_3D()
     if torch.cuda.is_available(): model = model.cuda()
 
@@ -136,6 +142,7 @@ def train(images_loader, masks_loader, opts):
 
     iter_per_epoch = len(images_loader) // opts.batch_size
     best_acc = 0.0
+    # criterion = nn.CrossEntropyLoss()
 
     for epoch in range(opts.epochs):
         # Make sure the images and masks match.
@@ -147,17 +154,25 @@ def train(images_loader, masks_loader, opts):
         torch.manual_seed(seed)
         iter_masks = iter(masks_loader)
 
+        batch_dice_coeff = 0.0
+
         for iteration in range(iter_per_epoch):
-            image = to_var(iter_images.next()[0]).float().unsqueeze(dim=1)
+            cur_mask = iter_masks.next()[0]
+            if torch.sum(cur_mask) == 0:
+                print('Invalid mask, continue')
+                continue
+            cur_image = iter_images.next()[0]
+            image = to_var(cur_image).float().unsqueeze(dim=1)
             # lungmask = to_var(iter_lungmasks.next()[0]).float().unsqueeze(dim=1)
-            mask = to_var(iter_masks.next()[0]).float().unsqueeze(dim=1)
-            # train_X = image * lungmask
+            mask = to_var(cur_mask).float().unsqueeze(dim=1)
+            # train_X = image * lungmask                
             train_X = image
 
             # Training
             optimizer.zero_grad()
             pred = model(train_X)
             dice_coef = dice_coef_loss(pred, mask)
+            batch_dice_coeff += dice_coef.detach().cpu().numpy()
             loss = ce_loss(pred, mask)
             loss.backward()
             optimizer.step()
@@ -167,10 +182,12 @@ def train(images_loader, masks_loader, opts):
                 epoch, iteration * len(image), len(images_loader),
                 100. * iteration * opts.batch_size / len(images_loader), loss.item()))
 
-            if -dice_coef.item() > best_acc:
-                best_acc = -dice_coef.item()
-                print('Saving model with dice coefficient =', best_acc)
-                torch.save(model, save_path)
+        batch_dice_coeff /= iter_per_epoch
+        print('epoch =', epoch, 'dice_coef =', batch_dice_coeff)
+        if -dice_coef.item() > best_acc:
+            best_acc = -dice_coef.item()
+            print('Saving model with dice coefficient =', best_acc)
+            torch.save(model, save_path)
 
         lr_scheduler.step()
 
@@ -216,17 +233,17 @@ def create_parser():
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/')
     # parser.add_argument('--test-batch-size', type=int, default=16, metavar='N',
     #                     help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=20, metavar='N',
+    parser.add_argument('--epochs', type=int, default=40, metavar='N',
                         help='number of epochs to train (default: 10)')
-    parser.add_argument('--lr', type=float, default=1.0e-1, metavar='LR',
+    parser.add_argument('--lr', type=float, default=1.0e-2, metavar='LR',
                         help='learning rate (default: 0.01)')
-    parser.add_argument('--decay_step', type=int, default=5, help='Number of steps before decaying.')
-    parser.add_argument('--decay_factor', type=float, default=0.1, help='The factor to be multiplied to the learning rate.')
+    parser.add_argument('--decay_step', type=int, default=8, help='Number of steps before decaying.')
+    parser.add_argument('--decay_factor', type=float, default=0.2, help='The factor to be multiplied to the learning rate.')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--log_interval', type=int, default=1, metavar='N',
+    parser.add_argument('--log_interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
 
     return parser

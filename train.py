@@ -10,7 +10,8 @@ from model import Unet, Unet_3D
 from dataloader import LungDataset, ToTensor
 import numpy as np
 import os
-
+import cv2
+from tensorboardX import SummaryWriter
 
 def dice_coef_loss(outputs, masks):
     """ Compute the dice coefficient loss between the output and groundtruth mask. """
@@ -60,7 +61,9 @@ class Resize(object):
         #     return imagedata[::self.down_factor, ::self.down_factor]
         # else:
         #     # return imagedata[::self.down_factor, ::self.down_factor, ::int(self.down_factor/2)]
-        return imagedata[::self.down_factor, ::self.down_factor, 96:-96]
+        imagedata = np.array(imagedata)
+        blurred_img = cv2.GaussianBlur(imagedata, (self.down_factor + 1, self.down_factor + 1), self.down_factor / 2.0)
+        return blurred_img[::self.down_factor, ::self.down_factor, 96:-96]
 
 
 def get_3d_data_loader(opts):
@@ -78,49 +81,6 @@ def get_3d_data_loader(opts):
 
     # return images_loader, lungmasks_loader, masks_loader
     return images_loader, masks_loader
-
-
-# def train(args, model, device, train_loader, optimizer, epoch):
-#     model.train()
-#     for batch_idx, (image, mask) in enumerate(train_loader):
-#         print('image.shape =', image.shape, 'mask.shape =', mask.shape)
-#         image, mask = image.to(device), mask.to(device)
-#         optimizer.zero_grad()
-#         output = model(image)
-#         loss = dice_coef_loss(output, mask)
-#         loss.backward()
-#         optimizer.step()
-#         if batch_idx % args.log_interval == 0:
-#             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-#                 epoch, batch_idx * len(image), len(train_loader.dataset),
-#                 100. * batch_idx / len(train_loader), loss.item()))
-
-
-# def train(args, model, device, training_images, training_masks, optimizer, epoch):
-#     model.train()
-#     best_acc = 0.0
-
-#     for i in range(len(training_images) // 8):
-#         cur_batch_img = training_images[i * 8 : (i + 1) * 8]
-#         cur_batch_mask = training_masks[i * 8 : (i + 1) * 8]
-#         # cur_batch_img = training_images[i].reshape((1,1,512,512))
-#         # cur_batch_mask = training_masks[i].reshape((1,1,512,512))
-#         # print('image.shape =', cur_batch_img.shape, 'mask.shape =', cur_batch_mask.shape)
-#         image, mask = cur_batch_img.to(device), cur_batch_mask.to(device)
-#         optimizer.zero_grad()
-#         output = model(image)
-#         loss = dice_coef_loss(output, mask)
-#         loss.backward()
-#         optimizer.step()
-#         if i % args.log_interval == 0:
-#             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-#                 epoch, i * len(image), len(training_images),
-#                 100. * i * args.batch_size / len(training_images), loss.item()))
-#         if -loss.item() > best_acc:
-#             if os.path.isfile('ckpt_' + str(epoch) + '_' + str(best_acc) + '.pt'):
-#                 os.remove('ckpt_' + str(epoch) + '_' + str(best_acc) + '.pt')
-#             best_acc = -loss.item()
-#             torch.save(model.state_dict(), 'ckpt_' + str(epoch) + '_' + str(best_acc) + '.pt')
 
 
 # def train(images_loader, lungmasks_loader, masks_loader, opts):
@@ -143,6 +103,7 @@ def train(images_loader, masks_loader, opts):
     iter_per_epoch = len(images_loader) // opts.batch_size
     best_acc = 0.0
     # criterion = nn.CrossEntropyLoss()
+    writer = SummaryWriter(log_dir='checkpoints/')
 
     for epoch in range(opts.epochs):
         # Make sure the images and masks match.
@@ -171,26 +132,32 @@ def train(images_loader, masks_loader, opts):
             # Training
             optimizer.zero_grad()
             pred = model(train_X)
-            dice_coef = dice_coef_loss(pred, mask)
+            dice_coef = -dice_coef_loss(pred, mask)
             batch_dice_coeff += dice_coef.detach().cpu().numpy()
             loss = ce_loss(pred, mask)
             loss.backward()
             optimizer.step()
 
             if iteration % opts.log_interval == 0:
+                writer.add_scalar('Train/dice_coef', dice_coef.item(), epoch * iter_per_epoch + iteration)
+                writer.add_scalar('Train/loss', loss.item(), epoch * iter_per_epoch + iteration)
+
                 print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {}'.format(
                 epoch, iteration * len(image), len(images_loader),
                 100. * iteration * opts.batch_size / len(images_loader), loss.item()))
 
         batch_dice_coeff /= iter_per_epoch
+        writer.add_scalar('Train/training_set_dice_coef', batch_dice_coeff.item(), epoch)
+        writer.add_scalar('Train/lr', optimizer.param_groups[0]['lr'], epoch)
         print('epoch =', epoch, 'dice_coef =', batch_dice_coeff)
-        if -dice_coef.item() > best_acc:
+        if batch_dice_coeff.item() > best_acc:
             best_acc = -dice_coef.item()
             print('Saving model with dice coefficient =', best_acc)
             torch.save(model, save_path)
 
         lr_scheduler.step()
 
+    writer.close()
     print('Finished')
 
 

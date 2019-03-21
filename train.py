@@ -66,10 +66,19 @@ class Resize(object):
         return blurred_img[::self.down_factor, ::self.down_factor, 96:-96]
 
 
+# class ToNumpy(object):
+#     """ Converts the imagedata into numpy array. """
+#     def __call__(self, imagedata):
+#         img = np.array(imagedata)
+#         return np.transpose(img, (2, 0, 1))
+
+
 def get_3d_data_loader(opts):
     """ Return the dataloader for 3d nodule images. """
-    transform = transforms.Compose([Resize(4),
-                                    transforms.ToTensor()])
+    transform = transforms.Compose([# ToNumpy()
+                                    # Resize(4),
+                                    transforms.ToTensor()
+                                    ])
 
     images_dataset = datasets.DatasetFolder(opts.images_path, load_image_npy, ['npy'], transform)
     # lungmasks_dataset = datasets.DatasetFolder(opts.lungmasks_path, load_mask_npy, ['npy'], transform)
@@ -83,14 +92,55 @@ def get_3d_data_loader(opts):
     return images_loader, masks_loader
 
 
+def random_crop_roi(mask, shape=[64, 128, 128]):
+    """ 
+    Randomly crop out the ROI given the mask tensor. 
+    Cropped shape = [64, 64, 64]
+    Returns: [[z_min, z_high], 
+              [y_min, y_high], 
+              [x_min, x_high]]
+    """
+    roi = mask.nonzero()
+    # if len(roi.shape) != 3:
+    #     print('Invalid mask!')
+    #     return None
+    z_min, z_max = roi[:, 0].min(), roi[:, 0].max()
+    y_min, y_max = roi[:, 1].min(), roi[:, 1].max()
+    x_min, x_max = roi[:, 2].min(), roi[:, 2].max()
+
+    z_range = z_max - z_min
+    y_range = y_max - y_min
+    x_range = x_max - x_min
+
+    z_high = max(shape[0] - z_range, 1)
+    y_high = max(shape[1] - y_range, 1)
+    x_high = max(shape[2] - x_range, 1)
+
+    z_split = torch.randint(z_high, (1,), dtype=torch.uint8).item()
+    y_split = torch.randint(y_high, (1,), dtype=torch.uint8).item()
+    x_split = torch.randint(x_high, (1,), dtype=torch.uint8).item()
+
+    # Make sure the crop does not exceed the boundary.
+    while z_min - z_split < 0 or z_max + (shape[0] - z_range - z_split) >= mask.shape[0]:
+        z_split = torch.randint(z_high, (1,), dtype=torch.uint8).item()
+    while y_min - y_split < 0 or y_max + (shape[1] - y_range - y_split) >= mask.shape[1]:
+        y_split = torch.randint(y_high, (1,), dtype=torch.uint8).item()
+    while x_min - x_split < 0 or x_max + (shape[2] - x_range - x_split) >= mask.shape[2]:
+        x_split = torch.randint(x_high, (1,), dtype=torch.uint8).item()
+
+    return torch.tensor([[z_min - z_split, z_max + (shape[0] - z_range - z_split)],
+                         [y_min - y_split, y_max + (shape[1] - y_range - y_split)],
+                         [x_min - x_split, x_max + (shape[2] - x_range - x_split)]])
+
 # def train(images_loader, lungmasks_loader, masks_loader, opts):
 def train(images_loader, masks_loader, opts):
     """
     Train the 3D Unet on the given datasets.
     """
     # Initialize or load the model
-    save_path = os.path.join(opts.checkpoint_dir, 'best_ckpt_2.51e-5.pth')
+    save_path = os.path.join(opts.checkpoint_dir, 'best_ckpt.pth')
     if os.path.exists(save_path): 
+        print('Loading from', save_path)
         model = torch.load(save_path)
         save_path = os.path.join(opts.checkpoint_dir, 'best_ckpt.pth')
     else: model = Unet_3D()
@@ -103,7 +153,7 @@ def train(images_loader, masks_loader, opts):
     iter_per_epoch = len(images_loader) // opts.batch_size
     best_acc = 0.0
     # criterion = nn.CrossEntropyLoss()
-    writer = SummaryWriter(log_dir='checkpoints/')
+    writer = SummaryWriter(log_dir=opts.checkpoint_dir)
 
     for epoch in range(opts.epochs):
         # Make sure the images and masks match.
@@ -118,11 +168,18 @@ def train(images_loader, masks_loader, opts):
         batch_dice_coeff = 0.0
 
         for iteration in range(iter_per_epoch):
-            cur_mask = iter_masks.next()[0]
-            if torch.sum(cur_mask) == 0:
-                print('Invalid mask, continue')
-                continue
+            cur_mask = iter_masks.next()[0]  # (1,256,512,512)
+            if cur_mask.max() == 0: continue
+            cur_mask[cur_mask > 0] = 1
+            # if torch.sum(cur_mask) == 0:
+            #     print('Invalid mask, continue')
+            #     continue
             cur_image = iter_images.next()[0]
+
+            # Randomly Crop out 
+            crop_idx = random_crop_roi(cur_mask[0])
+            cur_mask = cur_mask[:, crop_idx[0,0]:crop_idx[0,1], crop_idx[1,0]:crop_idx[1,1], crop_idx[2,0]:crop_idx[2,1]]
+            cur_image = cur_image[:, crop_idx[0,0]:crop_idx[0,1], crop_idx[1,0]:crop_idx[1,1], crop_idx[2,0]:crop_idx[2,1]]
             image = to_var(cur_image).float().unsqueeze(dim=1)
             # lungmask = to_var(iter_lungmasks.next()[0]).float().unsqueeze(dim=1)
             mask = to_var(cur_mask).float().unsqueeze(dim=1)
@@ -151,7 +208,7 @@ def train(images_loader, masks_loader, opts):
         writer.add_scalar('Train/lr', optimizer.param_groups[0]['lr'], epoch)
         print('epoch =', epoch, 'dice_coef =', batch_dice_coeff)
         if batch_dice_coeff.item() > best_acc:
-            best_acc = -dice_coef.item()
+            best_acc = batch_dice_coeff.item()
             print('Saving model with dice coefficient =', best_acc)
             torch.save(model, save_path)
 
@@ -197,14 +254,14 @@ def create_parser():
     parser.add_argument('--masks_path', type=str, default='D:\\code\\datasets\\data_science_bowl_2017\\processed_LUNA_full\\3d_data\\masks')
     parser.add_argument('--batch_size', type=int, default=1, metavar='N',
                         help='input batch size for training (default: 2)')
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_relaxed/')
     # parser.add_argument('--test-batch-size', type=int, default=16, metavar='N',
     #                     help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=40, metavar='N',
+    parser.add_argument('--epochs', type=int, default=60, metavar='N',
                         help='number of epochs to train (default: 10)')
     parser.add_argument('--lr', type=float, default=1.0e-2, metavar='LR',
                         help='learning rate (default: 0.01)')
-    parser.add_argument('--decay_step', type=int, default=8, help='Number of steps before decaying.')
+    parser.add_argument('--decay_step', type=int, default=20, help='Number of steps before decaying.')
     parser.add_argument('--decay_factor', type=float, default=0.2, help='The factor to be multiplied to the learning rate.')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')

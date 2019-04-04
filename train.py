@@ -13,6 +13,14 @@ import os
 import cv2
 from tensorboardX import SummaryWriter
 
+SEED = 0
+
+# Set the random seed manually for reproducibility.
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(SEED)
+
 def dice_coef_loss(outputs, masks):
     """ Compute the dice coefficient loss between the output and groundtruth mask. """
     outputs = torch.squeeze(outputs)
@@ -37,6 +45,26 @@ def ce_loss(outputs, masks):
     loss = -1 * torch.sum(intermediate)
     return 0.1 * loss.float() + 10 * dice_coef_loss(outputs, masks)
     # return loss.float()
+
+
+class DatasetFolderWithFileName(datasets.DatasetFolder):
+    """My DatasetFolder which returns image path (useful for debugging)"""
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+        Returns:
+            tuple: (sample, target) where target is class_index of the target class.
+        """
+        path, target = self.samples[index]
+        # print('path =', path, 'index =', index)
+        sample = self.loader(path)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return sample, target, path
 
 
 def load_image_npy(path):
@@ -80,16 +108,27 @@ def get_3d_data_loader(opts):
                                     transforms.ToTensor()
                                     ])
 
-    images_dataset = datasets.DatasetFolder(opts.images_path, load_image_npy, ['npy'], transform)
+    images_dataset = DatasetFolderWithFileName(opts.images_path, load_image_npy, ['npy'], transform)
     # lungmasks_dataset = datasets.DatasetFolder(opts.lungmasks_path, load_mask_npy, ['npy'], transform)
-    masks_dataset = datasets.DatasetFolder(opts.masks_path, load_mask_npy, ['npy'], transform)
+    masks_dataset = DatasetFolderWithFileName(opts.masks_path, load_mask_npy, ['npy'], transform)
 
-    images_loader = DataLoader(dataset=images_dataset, batch_size=opts.batch_size, shuffle=True)
+    # print('images_dataset[0] path =', images_dataset[0][2])
+    # print('masks_dataset[0] path =', masks_dataset[0][2])
+    # print('len(imageset) =', len(images_dataset))
+
+    # images_loader = DataLoader(dataset=images_dataset, batch_size=opts.batch_size, shuffle=True)
     # lungmasks_loader = DataLoader(dataset=lungmasks_dataset, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
-    masks_loader = DataLoader(dataset=masks_dataset, batch_size=opts.batch_size, shuffle=True)
+    # masks_loader = DataLoader(dataset=masks_dataset, batch_size=opts.batch_size, shuffle=True)
+
+    # torch.manual_seed(SEED)
+    # print('images_loader[0] path =', iter(images_loader).next()[2])
+    # print('images_loader[1] path =', iter(images_loader).next()[2])
+    # torch.manual_seed(SEED)
+    # print('masks_loader[0] path =', iter(masks_loader).next()[2])
+    # print('masks_loader[1] path =', iter(masks_loader).next()[2])
 
     # return images_loader, lungmasks_loader, masks_loader
-    return images_loader, masks_loader
+    return images_dataset, masks_dataset
 
 
 def random_crop_roi(mask, shape=[64, 128, 128]):
@@ -151,30 +190,51 @@ def train(images_loader, masks_loader, opts):
     lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, decay_steps, gamma=opts.decay_factor)
 
     iter_per_epoch = len(images_loader) // opts.batch_size
-    best_acc = 0.0
+    best_acc = 0.3313
+    order = np.arange(len(images_loader))
     # criterion = nn.CrossEntropyLoss()
     writer = SummaryWriter(log_dir=opts.checkpoint_dir)
 
     for epoch in range(opts.epochs):
         # Make sure the images and masks match.
-        seed = np.random.randint(opts.epochs)
-        torch.manual_seed(seed)
-        iter_images = iter(images_loader)
-        torch.manual_seed(seed)
+        # seed = np.random.randint(opts.epochs)
+        
+        np.random.shuffle(order)
+        # print('seed =', seed)
+        # torch.manual_seed(SEED)
+        # torch.cuda.manual_seed(seed)
+        # iter_masks = iter(masks_loader)
+        # print('masks_loader[0] path =', iter(masks_loader).next()[2])
+        
+        # print('seed =', seed)
+        # torch.manual_seed(SEED)
+        # torch.cuda.manual_seed(seed)
+        # iter_images = iter(images_loader)
+        # print('images_loader[0] path =', iter(images_loader).next()[2])
+
+        # print('masks_loader[0] path =', iter(masks_loader).next()[2])
+        # print('images_loader[0] path =', iter(images_loader).next()[2])
+        # torch.manual_seed(seed)
         # iter_lungmasks = iter(lungmasks_loader)
-        torch.manual_seed(seed)
-        iter_masks = iter(masks_loader)
 
         batch_dice_coeff = 0.0
 
         for iteration in range(iter_per_epoch):
-            cur_mask = iter_masks.next()[0]  # (1,256,512,512)
-            if cur_mask.max() == 0: continue
+            cur_mask_with_path = masks_loader[order[iteration]]  # (1,256,512,512)
+            cur_mask = torch.unsqueeze(cur_mask_with_path[0], 0)
+            if cur_mask.max() == 0: 
+                print('invalid mask')
+                # iter_images.next()
+                continue
             cur_mask[cur_mask > 0] = 1
             # if torch.sum(cur_mask) == 0:
             #     print('Invalid mask, continue')
             #     continue
-            cur_image = iter_images.next()[0]
+            cur_tmp = images_loader[order[iteration]]
+            cur_image = torch.unsqueeze(cur_tmp[0], 0)
+            cur_path = cur_tmp[2]
+            cur_path_mask = cur_mask_with_path[2]
+            # print('cur_path_img =', cur_path, 'cur_path_mask =', cur_path_mask)
 
             # Randomly Crop out 
             crop_idx = random_crop_roi(cur_mask[0])
@@ -185,6 +245,19 @@ def train(images_loader, masks_loader, opts):
             mask = to_var(cur_mask).float().unsqueeze(dim=1)
             # train_X = image * lungmask                
             train_X = image
+
+            ############## For debug use ##############
+            # print('cur_path =', cur_path)
+            # save_path_test = os.path.splitext(cur_path)[0] + '_img.npy'
+            # save_img = torch.squeeze(image).cpu().numpy()
+            # np.save(save_path_test, save_img)
+            # print('Saved', save_path_test)
+
+            # save_path_test = os.path.splitext(cur_path)[0] + '_mask.npy'
+            # save_mask = torch.squeeze(mask).cpu().numpy()
+            # np.save(save_path_test, save_mask)
+            # print('Saved', save_path_test)
+            ###########################################
 
             # Training
             optimizer.zero_grad()
@@ -257,11 +330,11 @@ def create_parser():
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_relaxed/')
     # parser.add_argument('--test-batch-size', type=int, default=16, metavar='N',
     #                     help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=60, metavar='N',
+    parser.add_argument('--epochs', type=int, default=40, metavar='N',
                         help='number of epochs to train (default: 10)')
     parser.add_argument('--lr', type=float, default=1.0e-2, metavar='LR',
                         help='learning rate (default: 0.01)')
-    parser.add_argument('--decay_step', type=int, default=20, help='Number of steps before decaying.')
+    parser.add_argument('--decay_step', type=int, default=15, help='Number of steps before decaying.')
     parser.add_argument('--decay_factor', type=float, default=0.2, help='The factor to be multiplied to the learning rate.')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
